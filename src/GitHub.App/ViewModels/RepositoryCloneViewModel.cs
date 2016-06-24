@@ -31,12 +31,13 @@ namespace GitHub.ViewModels
     {
         static readonly Logger log = LogManager.GetCurrentClassLogger();
 
+        readonly IRepositoryHost repositoryHost;
         readonly IRepositoryCloneService cloneService;
         readonly IOperatingSystem operatingSystem;
         readonly INotificationService notificationService;
         readonly ReactiveCommand<object> browseForDirectoryCommand = ReactiveCommand.Create();
         bool isLoading;
-        readonly ObservableAsPropertyHelper<bool> noRepositoriesFound;
+        bool noRepositoriesFound;
         readonly ObservableAsPropertyHelper<bool> canClone;
         string baseRepositoryPath;
         bool loadingFailed;
@@ -56,36 +57,26 @@ namespace GitHub.ViewModels
             IOperatingSystem operatingSystem,
             INotificationService notificationService)
         {
+            this.repositoryHost = repositoryHost;
             this.cloneService = cloneService;
             this.operatingSystem = operatingSystem;
             this.notificationService = notificationService;
 
             Title = string.Format(CultureInfo.CurrentCulture, Resources.CloneTitle, repositoryHost.Title);
-            IsLoading = true;
 
-            Repositories = repositoryHost.ModelService.GetRepositories(new TrackingCollection<IRepositoryModel>()) as TrackingCollection<IRepositoryModel>;
+            Repositories = new TrackingCollection<IRepositoryModel>();
             repositories.ProcessingDelay = TimeSpan.Zero;
             repositories.Comparer = OrderedComparer<IRepositoryModel>.OrderBy(x => x.Owner).ThenBy(x => x.Name).Compare;
             repositories.Filter = FilterRepository;
             repositories.NewerComparer = OrderedComparer<IRepositoryModel>.OrderByDescending(x => x.UpdatedAt).Compare;
 
-            repositories.OriginalCompleted.Subscribe(
-                _ => { }
-                , ex =>
-                {
-                    LoadingFailed = true;
-                    log.Error("Error while loading repositories", ex);
-                },
-                () => IsLoading = false
-            );
-            repositories.Subscribe();
-
-            filterTextIsEnabled = this.WhenAny(x => x.Repositories.Count, x => x.Value > 0)
+            filterTextIsEnabled = this.WhenAny(x => x.IsLoading, x => x.Value)
+                .Select(x => !x && repositories.UnfilteredCount > 0)
                 .ToProperty(this, x => x.FilterTextIsEnabled);
 
-            noRepositoriesFound = this.WhenAny(x => x.FilterTextIsEnabled, x => x.IsLoading, x => x.LoadingFailed
+            this.WhenAny(x => x.FilterTextIsEnabled, x => x.IsLoading, x => x.LoadingFailed
                 , (any, loading, failed) => !any.Value && !loading.Value && !failed.Value)
-                .ToProperty(this, x => x.NoRepositoriesFound);
+                .Subscribe(x => NoRepositoriesFound = x);
 
             this.WhenAny(x => x.FilterText, x => x.Value)
                 .DistinctUntilChanged(StringComparer.OrdinalIgnoreCase)
@@ -115,6 +106,26 @@ namespace GitHub.ViewModels
             this.WhenAny(x => x.BaseRepositoryPathValidator.ValidationResult, x => x.Value)
                 .Subscribe();
             BaseRepositoryPath = cloneService.DefaultClonePath;
+            NoRepositoriesFound = true;
+        }
+
+        public override void Initialize([AllowNull] ViewWithData data)
+        {
+            base.Initialize(data);
+
+            IsLoading = true;
+            Repositories = repositoryHost.ModelService.GetRepositories(repositories) as TrackingCollection<IRepositoryModel>;
+            repositories.OriginalCompleted.Subscribe(
+                _ => { }
+                , ex =>
+                {
+                    LoadingFailed = true;
+                    IsLoading = false;
+                    log.Error("Error while loading repositories", ex);
+                },
+                () => IsLoading = false
+            );
+            repositories.Subscribe();
         }
 
         bool FilterRepository(IRepositoryModel repo, int position, IList<IRepositoryModel> list)
@@ -212,13 +223,11 @@ namespace GitHub.ViewModels
         public IReactiveCommand<Unit> CloneCommand { get; private set; }
 
         TrackingCollection<IRepositoryModel> repositories;
-        /// <summary>
-        /// List of repositories as returned by the server
-        /// </summary>
         public ObservableCollection<IRepositoryModel> Repositories
         {
+            [return: AllowNull]
             get { return repositories; }
-            private set { repositories = value as TrackingCollection<IRepositoryModel>; this.RaisePropertyChanged(); }
+            private set { this.RaiseAndSetIfChanged(ref repositories, (TrackingCollection<IRepositoryModel>)value); }
         }
 
         IRepositoryModel selectedRepository;
@@ -265,7 +274,8 @@ namespace GitHub.ViewModels
 
         public bool NoRepositoriesFound
         {
-            get { return noRepositoriesFound.Value; }
+            get { return noRepositoriesFound; }
+            private set { this.RaiseAndSetIfChanged(ref noRepositoriesFound, value); }
         }
 
         public ICommand BrowseForDirectory
